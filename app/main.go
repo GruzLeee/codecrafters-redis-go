@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"os"
 )
@@ -21,9 +23,36 @@ func main() {
 		fmt.Println("Failed to bind to port 6379")
 		os.Exit(1)
 	}
-	_, err = l.Accept()
-	if err != nil {
-		fmt.Println("Error accepting connection: ", err.Error())
-		os.Exit(1)
+	defer l.Close()
+
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err.Error())
+			os.Exit(1)
+		}
+
+		go handleConnection(conn)
 	}
+}
+
+func handleConnection(conn net.Conn) {
+
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	// for {
+	_, err := reader.ReadString('\n')
+	if err != nil {
+		log.Printf("Read error: %v", err)
+		return
+	}
+
+	// ackMsg := strings.ToUpper(strings.TrimSpace(message))
+	response := fmt.Sprint("+PONG\r\n")
+	_, err = conn.Write([]byte(response))
+	if err != nil {
+		log.Printf("Server write error: %v", err)
+	}
+	// }
 }
