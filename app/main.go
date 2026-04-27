@@ -3,21 +3,13 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 )
 
-// Ensures gofmt doesn't remove the "net" and "os" imports in stage 1 (feel free to remove this!)
-var _ = net.Listen
-var _ = os.Exit
-
 func main() {
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	fmt.Println("Logs from your program will appear here!")
-
-	// Uncomment the code below to pass the first stage
-	//
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
@@ -28,35 +20,87 @@ func main() {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			fmt.Println("Error accepting connection: ", err.Error())
+			fmt.Println("Error accepting connection:", err)
 			os.Exit(1)
 		}
-
 		go handleConnection(conn)
 	}
 }
 
-func handleConnection(conn net.Conn) {
+// --- RESP parser ---
 
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-	for {
-		cmd, err := reader.ReadString('\n')
+func readCommand(r *bufio.Reader) ([]string, error) {
+	// Expect *<count>\r\n
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(line[1:]))
+	if err != nil {
+		return nil, err
+	}
+	args := make([]string, count)
+	for i := range args {
+		// $<len>\r\n
+		if _, err := r.ReadString('\n'); err != nil {
+			return nil, err
+		}
+		// <value>\r\n
+		val, err := r.ReadString('\n')
 		if err != nil {
-			log.Printf("Read error: %v", err)
+			return nil, err
+		}
+		args[i] = strings.TrimSpace(val)
+	}
+	return args, nil
+}
+
+// --- Command dispatcher ---
+
+type handler func(args []string) string
+
+var commands = map[string]handler{
+	"PING": cmdPing,
+	"ECHO": cmdEcho,
+	// "SET": cmdSet,
+	// "GET": cmdGet,
+}
+
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	for {
+		args, err := readCommand(r)
+		if err != nil {
 			return
 		}
-		log.Printf("%#v", cmd)
-
-		// ackMsg := strings.ToUpper(strings.TrimSpace(message))
-		if cmd == "PING\r\n" {
-
-			_, err = conn.Write([]byte("+PONG\r\n"))
-			// _, err = conn.Write([]byte(response))
-			if err != nil {
-				log.Printf("Server write error: %v", err)
-			}
+		name := strings.ToUpper(args[0])
+		h, ok := commands[name]
+		var resp string
+		if ok {
+			resp = h(args[1:])
+		} else {
+			resp = "-ERR unknown command '" + name + "'\r\n"
 		}
+		conn.Write([]byte(resp))
 	}
+}
+
+// --- Handlers ---
+
+func cmdPing(args []string) string {
+	if len(args) > 0 {
+		return "+" + args[0] + "\r\n"
+	}
+	return "+PONG\r\n"
+}
+
+func cmdEcho(args []string) string {
+	if len(args) == 0 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	length := len(args[0])
+
+	return fmt.Sprintf("$%d\r\n%s\r\n", length, args[0])
 }
