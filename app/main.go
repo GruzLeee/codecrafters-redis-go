@@ -41,18 +41,22 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
-	// for {
-	_, err := reader.ReadString('\n')
-	if err != nil {
-		log.Printf("Read error: %v", err)
-		return
-	}
+	for {
+		cmd, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("Read error: %v", err)
+			return
+		}
+		log.Printf("%#v", cmd)
 
-	// ackMsg := strings.ToUpper(strings.TrimSpace(message))
-	response := fmt.Sprint("+PONG\r\n")
-	_, err = conn.Write([]byte(response))
-	if err != nil {
-		log.Printf("Server write error: %v", err)
+		// ackMsg := strings.ToUpper(strings.TrimSpace(message))
+		if cmd == "PING\r\n" {
+
+			_, err = conn.Write([]byte("+PONG\r\n"))
+			// _, err = conn.Write([]byte(response))
+			if err != nil {
+				log.Printf("Server write error: %v", err)
+			}
+		}
 	}
-	// }
 }
