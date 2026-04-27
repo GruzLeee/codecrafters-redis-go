@@ -7,7 +7,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+type handler func(args []string) string
+
+type Cache struct {
+	items map[string]string
+	mu    sync.Mutex
+}
 
 func main() {
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
@@ -17,13 +25,24 @@ func main() {
 	}
 	defer l.Close()
 
+	cache := &Cache{
+		items: make(map[string]string),
+	}
+
+	var commands = map[string]handler{
+		"PING": cmdPing,
+		"ECHO": cmdEcho,
+		"SET":  cache.cmdSet,
+		"GET":  cache.cmdGet,
+	}
+
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection:", err)
 			os.Exit(1)
 		}
-		go handleConnection(conn)
+		go handleConnection(conn, commands)
 	}
 }
 
@@ -35,6 +54,7 @@ func readCommand(r *bufio.Reader) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// log.Printf("%q\n", line)
 	count, err := strconv.Atoi(strings.TrimSpace(line[1:]))
 	if err != nil {
 		return nil, err
@@ -50,6 +70,7 @@ func readCommand(r *bufio.Reader) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		// log.Printf("%q\n", val)
 		args[i] = strings.TrimSpace(val)
 	}
 	return args, nil
@@ -57,16 +78,7 @@ func readCommand(r *bufio.Reader) ([]string, error) {
 
 // --- Command dispatcher ---
 
-type handler func(args []string) string
-
-var commands = map[string]handler{
-	"PING": cmdPing,
-	"ECHO": cmdEcho,
-	// "SET": cmdSet,
-	// "GET": cmdGet,
-}
-
-func handleConnection(conn net.Conn) {
+func handleConnection(conn net.Conn, commands map[string]handler) {
 	defer conn.Close()
 	r := bufio.NewReader(conn)
 	for {
@@ -100,7 +112,31 @@ func cmdEcho(args []string) string {
 		return "-ERR wrong number of arguments\r\n"
 	}
 
-	length := len(args[0])
+	s := strings.Join(args, " ")
+	return fmt.Sprintf("$%d\r\n%s\r\n", len(s), s)
+}
 
-	return fmt.Sprintf("$%d\r\n%s\r\n", length, args[0])
+func (c *Cache) cmdSet(args []string) string {
+	if len(args) < 2 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	key := args[0]
+	value := args[1]
+
+	c.items[key] = value
+
+	return "+OK\r\n"
+}
+
+func (c *Cache) cmdGet(args []string) string {
+	if len(args) == 0 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	// log.Printf("%#v\n", args)
+
+	s := c.items[args[0]]
+
+	return fmt.Sprintf("$%d\r\n%s\r\n", len(s), s)
 }
