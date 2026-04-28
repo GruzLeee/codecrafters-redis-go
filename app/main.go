@@ -8,13 +8,24 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+)
+
+const (
+	nullBulkString = "$-1\r\n"
 )
 
 type handler func(args []string) string
 
+type item struct {
+	value  string
+	expiry time.Time
+}
+
 type Cache struct {
-	items map[string]string
-	mu    sync.Mutex
+	items    map[string]item
+	mu       sync.Mutex
+	interval time.Duration
 }
 
 func main() {
@@ -26,8 +37,11 @@ func main() {
 	defer l.Close()
 
 	cache := &Cache{
-		items: make(map[string]string),
+		items:    make(map[string]item),
+		interval: time.Minute,
 	}
+
+	go cache.reapLoop()
 
 	var commands = map[string]handler{
 		"PING": cmdPing,
@@ -121,10 +135,32 @@ func (c *Cache) cmdSet(args []string) string {
 		return "-ERR wrong number of arguments\r\n"
 	}
 
-	key := args[0]
-	value := args[1]
+	item := item{
+		value:  args[1],
+		expiry: time.Time{}, //zero value
+	}
 
-	c.items[key] = value
+	if len(args) > 3 {
+		duration, err := strconv.Atoi(args[3])
+		if err != nil {
+			return "-ERR error parsing expiration time\r\n"
+		}
+		switch args[2] {
+		case "EX":
+			item.expiry = time.Now().Add(time.Duration(duration))
+		case "PX":
+			item.expiry = time.Now().Add(time.Duration(duration) * time.Millisecond)
+		default:
+			return "-ERR unsupported expiration option\r\n"
+		}
+	}
+
+	key := args[0]
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.items[key] = item
 
 	return "+OK\r\n"
 }
@@ -136,7 +172,34 @@ func (c *Cache) cmdGet(args []string) string {
 
 	// log.Printf("%#v\n", args)
 
-	s := c.items[args[0]]
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	return fmt.Sprintf("$%d\r\n%s\r\n", len(s), s)
+	if s, ok := c.items[args[0]]; ok && !s.isExpired() {
+		return fmt.Sprintf("$%d\r\n%s\r\n", len(s.value), s.value)
+	}
+
+	return nullBulkString
+}
+
+// --- Cache clear ---
+
+func (c *Cache) reapLoop() {
+	ticker := time.NewTicker(c.interval)
+	for range ticker.C {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for key, item := range c.items {
+			if item.isExpired() {
+				delete(c.items, key)
+			}
+		}
+	}
+}
+
+func (i item) isExpired() bool {
+	if i.expiry.IsZero() {
+		return false
+	}
+	return time.Now().After(i.expiry)
 }
