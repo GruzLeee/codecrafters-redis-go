@@ -44,11 +44,12 @@ func main() {
 	go cache.reapLoop()
 
 	var commands = map[string]handler{
-		"PING":  cmdPing,
-		"ECHO":  cmdEcho,
-		"SET":   cache.cmdSet,
-		"GET":   cache.cmdGet,
-		"RPUSH": cache.cmdRpush,
+		"PING":   cmdPing,
+		"ECHO":   cmdEcho,
+		"SET":    cache.cmdSet,
+		"GET":    cache.cmdGet,
+		"RPUSH":  cache.cmdRpush,
+		"LRANGE": cache.cmdLrange,
 	}
 
 	for {
@@ -225,6 +226,43 @@ func (c *Cache) cmdRpush(args []string) string {
 	c.items[key] = i
 
 	return fmt.Sprintf(":%d\r\n", length)
+}
+
+func (c *Cache) cmdLrange(args []string) string {
+	if len(args) < 3 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	key := args[0]
+
+	start, err := strconv.Atoi(args[1])
+	if err != nil {
+		return "-ERR start must be a valid integer\r\n"
+	}
+	stop, err := strconv.Atoi(args[2])
+	if err != nil {
+		return "-ERR stop must be a valid integer\r\n"
+	}
+
+	if item, exists := c.items[key]; exists {
+		if list, ok := item.value.([]string); ok {
+			if start > len(list) || start > stop {
+				return "*0\r\n"
+			}
+			if stop > len(list) {
+				stop = len(list) - 1
+			}
+			var respArray strings.Builder
+			fmt.Fprintf(&respArray, "*%d\r\n", stop-start+1)
+			for i := start; i <= stop; i++ {
+				v := list[i]
+				fmt.Fprintf(&respArray, "$%d\r\n%s\r\n", len(v), v)
+			}
+			return respArray.String()
+		}
+		return "-ERR wrong type\r\n"
+	}
+	return "*0\r\n"
 }
 
 // --- Cache clear ---
