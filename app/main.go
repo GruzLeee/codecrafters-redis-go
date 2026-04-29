@@ -201,6 +201,7 @@ func (c *Cache) cmdRpush(args []string) string {
 
 	key := args[0]
 	values := args[1:]
+	length := len(args[1:])
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -210,6 +211,7 @@ func (c *Cache) cmdRpush(args []string) string {
 		if list, ok := i.value.([]string); ok {
 			list = append(list, values...)
 			i.value = list
+			length = len(list)
 		} else {
 			return "-ERR wrong type\r\n"
 		}
@@ -222,7 +224,7 @@ func (c *Cache) cmdRpush(args []string) string {
 
 	c.items[key] = i
 
-	return fmt.Sprintf(":%d\r\n", len(values))
+	return fmt.Sprintf(":%d\r\n", length)
 }
 
 // --- Cache clear ---
