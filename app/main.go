@@ -18,7 +18,7 @@ const (
 type handler func(args []string) string
 
 type item struct {
-	value  string
+	value  any
 	expiry time.Time
 }
 
@@ -44,10 +44,11 @@ func main() {
 	go cache.reapLoop()
 
 	var commands = map[string]handler{
-		"PING": cmdPing,
-		"ECHO": cmdEcho,
-		"SET":  cache.cmdSet,
-		"GET":  cache.cmdGet,
+		"PING":  cmdPing,
+		"ECHO":  cmdEcho,
+		"SET":   cache.cmdSet,
+		"GET":   cache.cmdGet,
+		"RPUSH": cache.cmdRpush,
 	}
 
 	for {
@@ -172,14 +173,56 @@ func (c *Cache) cmdGet(args []string) string {
 
 	// log.Printf("%#v\n", args)
 
+	key := args[0]
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if s, ok := c.items[args[0]]; ok && !s.isExpired() {
-		return fmt.Sprintf("$%d\r\n%s\r\n", len(s.value), s.value)
+	if i, ok := c.items[key]; ok && !i.isExpired() {
+		switch v := i.value.(type) {
+		case string:
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(v), v)
+
+		case []string:
+			// return fmt.Sprintf("*/d\r\n")
+
+		default:
+			fmt.Println("unknown")
+		}
 	}
 
 	return nullBulkString
+}
+
+func (c *Cache) cmdRpush(args []string) string {
+	if len(args) < 2 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	key := args[0]
+	values := args[1:]
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	i, exists := c.items[key]
+	if exists {
+		if list, ok := i.value.([]string); ok {
+			list = append(list, values...)
+			i.value = list
+		} else {
+			return "-ERR wrong type\r\n"
+		}
+	} else {
+		i = item{
+			value:  values,
+			expiry: time.Time{},
+		}
+	}
+
+	c.items[key] = i
+
+	return fmt.Sprintf(":%d\r\n", len(values))
 }
 
 // --- Cache clear ---
