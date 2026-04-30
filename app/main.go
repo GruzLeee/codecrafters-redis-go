@@ -246,11 +246,26 @@ func (c *Cache) cmdLrange(args []string) string {
 
 	if item, exists := c.items[key]; exists {
 		if list, ok := item.value.([]string); ok {
-			if start > len(list) || start > stop {
+			listLen := len(list)
+			if start < 0 {
+				if start < -listLen {
+					start = 0
+				} else {
+					start += listLen
+				}
+			}
+			if stop < 0 {
+				if stop < -listLen {
+					stop = 0
+				} else {
+					stop += listLen
+				}
+			}
+			if start > listLen || start > stop {
 				return "*0\r\n"
 			}
-			if stop > len(list) {
-				stop = len(list) - 1
+			if stop > listLen {
+				stop = listLen - 1
 			}
 			var respArray strings.Builder
 			fmt.Fprintf(&respArray, "*%d\r\n", stop-start+1)
@@ -269,14 +284,16 @@ func (c *Cache) cmdLrange(args []string) string {
 
 func (c *Cache) reapLoop() {
 	ticker := time.NewTicker(c.interval)
+	// defer ticker.Stop()
 	for range ticker.C {
 		c.mu.Lock()
-		defer c.mu.Unlock()
+
 		for key, item := range c.items {
 			if item.isExpired() {
 				delete(c.items, key)
 			}
 		}
+		defer c.mu.Unlock()
 	}
 }
 
