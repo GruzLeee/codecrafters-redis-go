@@ -64,6 +64,7 @@ func main() {
 		"LRANGE": cache.cmdLrange,
 		"LPUSH":  cache.cmdLpush,
 		"LLEN":   cache.cmdLlen,
+		"LPOP":   cache.cmdLpop,
 	}
 
 	for {
@@ -376,6 +377,31 @@ func (c *Cache) cmdLlen(args []string) string {
 		}
 	}
 	return ":0\r\n"
+}
+
+func (c *Cache) cmdLpop(args []string) string {
+	if len(args) != 1 {
+		return "-ERR wrong number of parameters\r\n"
+	}
+
+	key := args[0]
+
+	if i, exists := c.items[key]; exists {
+		if list, ok := i.value.(restArray); ok {
+			if list.count > 0 {
+				pop := list.head
+				list.head = list.head.next
+				list.count--
+				c.items[key] = item{
+					value:  list,
+					expiry: i.expiry,
+				}
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(pop.data), pop.data)
+			}
+		}
+	}
+	return "$-1\r\n"
+
 }
 
 // --- Cache clear ---
