@@ -380,23 +380,43 @@ func (c *Cache) cmdLlen(args []string) string {
 }
 
 func (c *Cache) cmdLpop(args []string) string {
-	if len(args) != 1 {
+	if len(args) < 1 {
 		return "-ERR wrong number of parameters\r\n"
 	}
 
 	key := args[0]
+	count := 1
+	var err error
+	if len(args) > 1 {
+		count, err = strconv.Atoi(args[1])
+		if err != nil {
+			return "-ERR invalid range\r\n"
+		}
+	}
 
+	fmt.Println(count)
 	if i, exists := c.items[key]; exists {
 		if list, ok := i.value.(restArray); ok {
 			if list.count > 0 {
-				pop := list.head
-				list.head = list.head.next
-				list.count--
+				if count > list.count {
+					count = list.count
+				}
+				var respArray strings.Builder
+				for i := count; i > 0; i-- {
+					pop := list.head
+					list.head = list.head.next
+					list.count--
+					fmt.Fprintf(&respArray, "$%d\r\n%s\r\n", len(pop.data), pop.data)
+				}
 				c.items[key] = item{
 					value:  list,
 					expiry: i.expiry,
 				}
-				return fmt.Sprintf("$%d\r\n%s\r\n", len(pop.data), pop.data)
+				if count > 1 {
+					return fmt.Sprintf("*%d\r\n%s", count, &respArray)
+				} else {
+					return respArray.String()
+				}
 			}
 		}
 	}
