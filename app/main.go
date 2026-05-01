@@ -63,6 +63,7 @@ func main() {
 		"RPUSH":  cache.cmdRpush,
 		"LRANGE": cache.cmdLrange,
 		"LPUSH":  cache.cmdLpush,
+		"LLEN":   cache.cmdLlen,
 	}
 
 	for {
@@ -360,6 +361,21 @@ func (c *Cache) cmdLpush(args []string) string {
 	c.items[key] = i
 
 	return fmt.Sprintf(":%d\r\n", length)
+}
+
+func (c *Cache) cmdLlen(args []string) string {
+	if len(args) != 1 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	key := args[0]
+
+	if i, exists := c.items[key]; exists {
+		if list, ok := i.value.(restArray); ok {
+			return fmt.Sprintf(":%d\r\n", list.count)
+		}
+	}
+	return ":0\r\n"
 }
 
 // --- Cache clear ---
