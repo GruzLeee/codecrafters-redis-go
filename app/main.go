@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -20,6 +21,17 @@ type handler func(args []string) string
 type item struct {
 	value  any
 	expiry time.Time
+}
+
+type restArrayElement struct {
+	next *restArrayElement
+	data string
+}
+
+type restArray struct {
+	head  *restArrayElement
+	tail  *restArrayElement
+	count int
 }
 
 type Cache struct {
@@ -50,6 +62,7 @@ func main() {
 		"GET":    cache.cmdGet,
 		"RPUSH":  cache.cmdRpush,
 		"LRANGE": cache.cmdLrange,
+		"LPUSH":  cache.cmdLpush,
 	}
 
 	for {
@@ -207,24 +220,40 @@ func (c *Cache) cmdRpush(args []string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	head := restArrayElement{
+		data: values[0],
+	}
+	tail := &head
+	for _, v := range values[1:] {
+		tail.next = &restArrayElement{
+			data: v,
+		}
+		tail = tail.next
+	}
+
 	i, exists := c.items[key]
 	if exists {
-		if list, ok := i.value.([]string); ok {
-			list = append(list, values...)
+		if list, ok := i.value.(restArray); ok {
+			list.tail.next = &head
+			list.tail = tail
+			list.count += length
+			length = list.count
 			i.value = list
-			length = len(list)
 		} else {
-			return "-ERR wrong type\r\n"
+			return "-ERR\r\n"
 		}
 	} else {
 		i = item{
-			value:  values,
+			value: restArray{
+				head:  &head,
+				tail:  tail,
+				count: length,
+			},
 			expiry: time.Time{},
 		}
 	}
 
 	c.items[key] = i
-
 	return fmt.Sprintf(":%d\r\n", length)
 }
 
@@ -245,8 +274,8 @@ func (c *Cache) cmdLrange(args []string) string {
 	}
 
 	if item, exists := c.items[key]; exists {
-		if list, ok := item.value.([]string); ok {
-			listLen := len(list)
+		if list, ok := item.value.(restArray); ok {
+			listLen := list.count
 			if start < 0 {
 				if start < -listLen {
 					start = 0
@@ -269,15 +298,68 @@ func (c *Cache) cmdLrange(args []string) string {
 			}
 			var respArray strings.Builder
 			fmt.Fprintf(&respArray, "*%d\r\n", stop-start+1)
-			for i := start; i <= stop; i++ {
-				v := list[i]
-				fmt.Fprintf(&respArray, "$%d\r\n%s\r\n", len(v), v)
+			i := 0
+			for curr := list.head; curr != nil; curr = curr.next {
+				if i >= start && i <= stop {
+					fmt.Fprintf(&respArray, "$%d\r\n%s\r\n", len(curr.data), curr.data)
+				}
+				i++
 			}
 			return respArray.String()
 		}
 		return "-ERR wrong type\r\n"
 	}
 	return "*0\r\n"
+}
+
+func (c *Cache) cmdLpush(args []string) string {
+	if len(args) < 2 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	key := args[0]
+	values := args[1:]
+	length := len(values)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	head := restArrayElement{
+		data: values[length-1],
+	}
+	tail := &head
+	for i := length - 2; i >= 0; i-- {
+		tail.next = &restArrayElement{
+			data: values[i],
+		}
+		tail = tail.next
+	}
+
+	i, exists := c.items[key]
+	if exists {
+		if list, ok := i.value.(restArray); ok {
+			tail.next = list.head
+			list.head = &head
+			list.count += length
+			length = list.count
+			i.value = list
+		} else {
+			return "-ERR \r\n"
+		}
+	} else {
+		i = item{
+			value: restArray{
+				head:  &head,
+				tail:  tail,
+				count: length,
+			},
+			expiry: time.Time{},
+		}
+	}
+
+	c.items[key] = i
+
+	return fmt.Sprintf(":%d\r\n", length)
 }
 
 // --- Cache clear ---
@@ -302,4 +384,10 @@ func (i item) isExpired() bool {
 		return false
 	}
 	return time.Now().After(i.expiry)
+}
+
+func logArray(head *restArrayElement) {
+	for curr := head; curr != nil; curr = curr.next {
+		log.Printf("%s", curr.data)
+	}
 }
