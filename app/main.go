@@ -32,7 +32,6 @@ type restArray struct {
 	head  *restArrayElement
 	tail  *restArrayElement
 	count int
-	// popQueue consumerQueue
 }
 
 type Cache struct {
@@ -81,6 +80,7 @@ func main() {
 		"LLEN":   cache.cmdLlen,
 		"LPOP":   cache.cmdLpop,
 		"BLPOP":  cache.cmdBlpop,
+		"TYPE":   cache.cmdType,
 	}
 
 	for {
@@ -455,7 +455,7 @@ func (c *Cache) cmdBlpop(args []string) string {
 		return "-ERR invalid expiration time \r\n"
 	}
 	if expiration == 0 {
-		expiration = time.Hour * 9999
+		expiration = time.Hour * 0x7fff
 	}
 
 	c.mu.Lock()
@@ -524,6 +524,24 @@ func (c *Cache) cmdBlpop(args []string) string {
 	}
 
 	return retString
+}
+
+func (c *Cache) cmdType(args []string) string {
+	if len(args) != 1 {
+		return "-ERR wrong number of arguments for 'type' command"
+	}
+
+	key := args[0]
+	retType := "none"
+	if item, exists := c.items[key]; exists {
+		switch item.value.(type) {
+		case string:
+			retType = "string"
+		case restArray:
+			retType = "list"
+		}
+	}
+	return fmt.Sprintf("+%s\r\n", retType)
 }
 
 // --- Cache clear ---
