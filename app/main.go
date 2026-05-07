@@ -32,12 +32,26 @@ type restArray struct {
 	head  *restArrayElement
 	tail  *restArrayElement
 	count int
+	// popQueue consumerQueue
 }
 
 type Cache struct {
-	items    map[string]item
+	items    map[string]*item
 	mu       sync.Mutex
 	interval time.Duration
+	popQueue map[string]*consumerQueue
+}
+
+type consumerQueue struct {
+	head  *consumer
+	tail  *consumer
+	count int
+}
+
+type consumer struct {
+	next *consumer
+	prev *consumer
+	ch   chan *restArray
 }
 
 func main() {
@@ -49,8 +63,9 @@ func main() {
 	defer l.Close()
 
 	cache := &Cache{
-		items:    make(map[string]item),
-		interval: time.Minute,
+		items:    make(map[string]*item),
+		interval: time.Hour,
+		popQueue: make(map[string]*consumerQueue),
 	}
 
 	go cache.reapLoop()
@@ -65,6 +80,7 @@ func main() {
 		"LPUSH":  cache.cmdLpush,
 		"LLEN":   cache.cmdLlen,
 		"LPOP":   cache.cmdLpop,
+		"BLPOP":  cache.cmdBlpop,
 	}
 
 	for {
@@ -101,7 +117,6 @@ func readCommand(r *bufio.Reader) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		// log.Printf("%q\n", val)
 		args[i] = strings.TrimSpace(val)
 	}
 	return args, nil
@@ -120,6 +135,7 @@ func handleConnection(conn net.Conn, commands map[string]handler) {
 		name := strings.ToUpper(args[0])
 		h, ok := commands[name]
 		var resp string
+		// log.Print(conn.RemoteAddr())
 		if ok {
 			resp = h(args[1:])
 		} else {
@@ -177,7 +193,7 @@ func (c *Cache) cmdSet(args []string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.items[key] = item
+	c.items[key] = &item
 
 	return "+OK\r\n"
 }
@@ -186,8 +202,6 @@ func (c *Cache) cmdGet(args []string) string {
 	if len(args) == 0 {
 		return "-ERR wrong number of arguments\r\n"
 	}
-
-	// log.Printf("%#v\n", args)
 
 	key := args[0]
 
@@ -210,55 +224,6 @@ func (c *Cache) cmdGet(args []string) string {
 	return nullBulkString
 }
 
-func (c *Cache) cmdRpush(args []string) string {
-	if len(args) < 2 {
-		return "-ERR wrong number of arguments\r\n"
-	}
-
-	key := args[0]
-	values := args[1:]
-	length := len(args[1:])
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	head := restArrayElement{
-		data: values[0],
-	}
-	tail := &head
-	for _, v := range values[1:] {
-		tail.next = &restArrayElement{
-			data: v,
-		}
-		tail = tail.next
-	}
-
-	i, exists := c.items[key]
-	if exists {
-		if list, ok := i.value.(restArray); ok {
-			list.tail.next = &head
-			list.tail = tail
-			list.count += length
-			length = list.count
-			i.value = list
-		} else {
-			return "-ERR\r\n"
-		}
-	} else {
-		i = item{
-			value: restArray{
-				head:  &head,
-				tail:  tail,
-				count: length,
-			},
-			expiry: time.Time{},
-		}
-	}
-
-	c.items[key] = i
-	return fmt.Sprintf(":%d\r\n", length)
-}
-
 func (c *Cache) cmdLrange(args []string) string {
 	if len(args) < 3 {
 		return "-ERR wrong number of arguments\r\n"
@@ -276,7 +241,7 @@ func (c *Cache) cmdLrange(args []string) string {
 	}
 
 	if item, exists := c.items[key]; exists {
-		if list, ok := item.value.(restArray); ok {
+		if list, ok := item.value.(*restArray); ok {
 			listLen := list.count
 			if start < 0 {
 				if start < -listLen {
@@ -323,9 +288,6 @@ func (c *Cache) cmdLpush(args []string) string {
 	values := args[1:]
 	length := len(values)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	head := restArrayElement{
 		data: values[length-1],
 	}
@@ -337,29 +299,35 @@ func (c *Cache) cmdLpush(args []string) string {
 		tail = tail.next
 	}
 
-	i, exists := c.items[key]
-	if exists {
-		if list, ok := i.value.(restArray); ok {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if i, exists := c.items[key]; exists {
+		if list, ok := i.value.(*restArray); ok {
 			tail.next = list.head
 			list.head = &head
 			list.count += length
 			length = list.count
-			i.value = list
 		} else {
 			return "-ERR \r\n"
 		}
 	} else {
-		i = item{
-			value: restArray{
+		i = &item{
+			value: &restArray{
 				head:  &head,
 				tail:  tail,
 				count: length,
 			},
 			expiry: time.Time{},
 		}
+		c.items[key] = i
 	}
-
-	c.items[key] = i
+	if queue, exists := c.popQueue[key]; exists {
+		consumer := queue.head
+		for i := length; i > 0 && consumer != nil; i-- {
+			consumer.ch <- c.items[key].value.(*restArray)
+			consumer = consumer.next
+		}
+	}
 
 	return fmt.Sprintf(":%d\r\n", length)
 }
@@ -372,7 +340,7 @@ func (c *Cache) cmdLlen(args []string) string {
 	key := args[0]
 
 	if i, exists := c.items[key]; exists {
-		if list, ok := i.value.(restArray); ok {
+		if list, ok := i.value.(*restArray); ok {
 			return fmt.Sprintf(":%d\r\n", list.count)
 		}
 	}
@@ -396,7 +364,7 @@ func (c *Cache) cmdLpop(args []string) string {
 
 	fmt.Println(count)
 	if i, exists := c.items[key]; exists {
-		if list, ok := i.value.(restArray); ok {
+		if list, ok := i.value.(*restArray); ok {
 			if list.count > 0 {
 				if count > list.count {
 					count = list.count
@@ -408,9 +376,8 @@ func (c *Cache) cmdLpop(args []string) string {
 					list.count--
 					fmt.Fprintf(&respArray, "$%d\r\n%s\r\n", len(pop.data), pop.data)
 				}
-				c.items[key] = item{
-					value:  list,
-					expiry: i.expiry,
+				if list.count == 0 {
+					delete(c.items, key)
 				}
 				if count > 1 {
 					return fmt.Sprintf("*%d\r\n%s", count, &respArray)
@@ -420,8 +387,144 @@ func (c *Cache) cmdLpop(args []string) string {
 			}
 		}
 	}
+
 	return "$-1\r\n"
 
+}
+
+func (c *Cache) cmdRpush(args []string) string {
+	if len(args) < 2 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	key := args[0]
+	values := args[1:]
+	length := len(args[1:])
+
+	head := restArrayElement{
+		data: values[0],
+	}
+	tail := &head
+	for _, v := range values[1:] {
+		tail.next = &restArrayElement{
+			data: v,
+		}
+		tail = tail.next
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if i, exists := c.items[key]; exists {
+		if list, ok := i.value.(*restArray); ok {
+			list.tail.next = &head
+			list.tail = tail
+			list.count += length
+			length = list.count
+		} else {
+			return "-ERR\r\n"
+		}
+	} else {
+		i = &item{
+			value: &restArray{
+				head:  &head,
+				tail:  tail,
+				count: length,
+			},
+			expiry: time.Time{},
+		}
+		c.items[key] = i
+	}
+
+	if queue, exists := c.popQueue[key]; exists {
+		consumer := queue.head
+		for i := length; i > 0 && consumer != nil; i-- {
+			consumer.ch <- c.items[key].value.(*restArray)
+			consumer = consumer.next
+		}
+	}
+	return fmt.Sprintf(":%d\r\n", length)
+}
+
+func (c *Cache) cmdBlpop(args []string) string {
+	if len(args) != 2 {
+		return "-ERR wrong number of parameters\r\n"
+	}
+
+	key := args[0]
+	expiration, err := strconv.Atoi(args[1])
+
+	if err != nil {
+		return "-ERR invalid expiration time \r\n"
+	}
+	if expiration == 0 {
+		expiration = 99999999999
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if i, exists := c.items[key]; exists {
+		if list, ok := i.value.(*restArray); ok {
+			if list.count > 0 {
+				pop := list.head
+				list.head = list.head.next
+				list.count--
+				if list.count == 0 {
+					delete(c.items, key)
+				}
+				return fmt.Sprintf("*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(key), key, len(pop.data), pop.data)
+			}
+			log.Print("WTF")
+		} else {
+			return "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+		}
+	}
+
+	newConsumer := &consumer{
+		ch: make(chan *restArray, 1),
+	}
+	queue, exists := c.popQueue[key]
+	if exists {
+		newConsumer.prev = queue.tail
+		queue.tail.next = newConsumer
+		queue.tail = newConsumer
+		queue.count++
+	} else {
+		newConsumerQueue := &consumerQueue{
+			head:  newConsumer,
+			tail:  newConsumer,
+			count: 1,
+		}
+		c.popQueue[key] = newConsumerQueue
+	}
+	c.mu.Unlock()
+
+	var retString string
+
+	select {
+	case <-time.After(time.Second * time.Duration(expiration)):
+		c.mu.Lock()
+		retString = "$-1\r\n"
+	case restArray := <-newConsumer.ch:
+		c.mu.Lock()
+		pop := restArray.head
+		restArray.head = restArray.head.next
+		restArray.count--
+		if restArray.count == 0 {
+			delete(c.items, key)
+		}
+		retString = fmt.Sprintf("*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(key), key, len(pop.data), pop.data)
+	}
+
+	c.popQueue[key].count--
+	if c.popQueue[key].count == 0 {
+		delete(c.popQueue, key)
+	} else if c.popQueue[key].head == newConsumer {
+		c.popQueue[key].head = c.popQueue[key].head.next
+	} else {
+		newConsumer.prev.next = newConsumer.next
+		newConsumer.next = newConsumer.prev
+	}
+
+	return retString
 }
 
 // --- Cache clear ---
