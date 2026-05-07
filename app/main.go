@@ -450,13 +450,12 @@ func (c *Cache) cmdBlpop(args []string) string {
 	}
 
 	key := args[0]
-	expiration, err := strconv.Atoi(args[1])
-
+	expiration, err := time.ParseDuration(args[1] + "s")
 	if err != nil {
 		return "-ERR invalid expiration time \r\n"
 	}
 	if expiration == 0 {
-		expiration = 99999999999
+		expiration = time.Hour * 9999
 	}
 
 	c.mu.Lock()
@@ -472,7 +471,6 @@ func (c *Cache) cmdBlpop(args []string) string {
 				}
 				return fmt.Sprintf("*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(key), key, len(pop.data), pop.data)
 			}
-			log.Print("WTF")
 		} else {
 			return "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
 		}
@@ -500,9 +498,10 @@ func (c *Cache) cmdBlpop(args []string) string {
 	var retString string
 
 	select {
-	case <-time.After(time.Second * time.Duration(expiration)):
+	case <-time.After(expiration):
 		c.mu.Lock()
-		retString = "$-1\r\n"
+		retString = "*-1\r\n"
+
 	case restArray := <-newConsumer.ch:
 		c.mu.Lock()
 		pop := restArray.head
