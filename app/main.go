@@ -53,6 +53,15 @@ type consumer struct {
 	ch   chan *restArray
 }
 
+type stream struct {
+	streamEntries map[string]*streamEntry
+}
+
+type streamEntry struct {
+	id string
+	kv map[string]string
+}
+
 func main() {
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
@@ -81,6 +90,7 @@ func main() {
 		"LPOP":   cache.cmdLpop,
 		"BLPOP":  cache.cmdBlpop,
 		"TYPE":   cache.cmdType,
+		"XADD":   cache.cmdXadd,
 	}
 
 	for {
@@ -537,11 +547,56 @@ func (c *Cache) cmdType(args []string) string {
 		switch item.value.(type) {
 		case string:
 			retType = "string"
-		case restArray:
+		case *restArray:
 			retType = "list"
+		case *stream:
+			retType = "stream"
 		}
 	}
 	return fmt.Sprintf("+%s\r\n", retType)
+}
+
+func (c *Cache) cmdXadd(args []string) string {
+	if len(args) < 4 {
+		return "-ERR wrong number of arguments for 'xadd' command"
+	}
+
+	streamKey := args[0]
+	streamId := args[1]
+	// key := args[2]
+	// value := args[3]
+
+	newEntry := &streamEntry{
+		id: streamId,
+		kv: make(map[string]string),
+	}
+
+	for i := 2; i < len(args[2:]); i += 2 {
+		newEntry.kv[args[i]] = args[i+1]
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if i, exists := c.items[streamKey]; exists {
+		if stream, ok := i.value.(*stream); ok {
+			stream.streamEntries[streamId] = newEntry
+		} else {
+			return "-ERR not steram\r\n"
+		}
+	} else {
+		newStream := &stream{
+			streamEntries: map[string]*streamEntry{
+				streamId: newEntry,
+			},
+		}
+		newItem := item{
+			value:  newStream,
+			expiry: time.Time{},
+		}
+		c.items[streamKey] = &newItem
+	}
+
+	return fmt.Sprintf("$%d\r\n%s\r\n", len(streamId), streamId)
 }
 
 // --- Cache clear ---
