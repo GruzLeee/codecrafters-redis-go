@@ -54,7 +54,7 @@ type consumer struct {
 }
 
 type stream struct {
-	streamEntries map[string]*streamEntry
+	streamEntries []*streamEntry
 }
 
 type streamEntry struct {
@@ -558,16 +558,22 @@ func (c *Cache) cmdType(args []string) string {
 
 func (c *Cache) cmdXadd(args []string) string {
 	if len(args) < 4 {
-		return "-ERR wrong number of arguments for 'xadd' command"
+		return "-ERR wrong number of arguments for 'xadd' command\r\n"
 	}
 
 	streamKey := args[0]
-	streamId := args[1]
-	// key := args[2]
-	// value := args[3]
+	streamId := strings.Split(args[1], "-")
+	if len(streamId) != 2 {
+		return "-ERR wrong id format\r\n"
+	}
+	if args[1] == "0-0" {
+		return "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+	}
+	newMsTime := streamId[0]
+	newSeq := streamId[1]
 
 	newEntry := &streamEntry{
-		id: streamId,
+		id: args[1],
 		kv: make(map[string]string),
 	}
 
@@ -579,14 +585,20 @@ func (c *Cache) cmdXadd(args []string) string {
 	defer c.mu.Unlock()
 	if i, exists := c.items[streamKey]; exists {
 		if stream, ok := i.value.(*stream); ok {
-			stream.streamEntries[streamId] = newEntry
+			prevId := strings.Split(stream.streamEntries[len(stream.streamEntries)-1].id, "-")
+			prevMsTime := prevId[0]
+			prevSeq := prevId[1]
+			if newMsTime < prevMsTime || (newMsTime == prevMsTime && newSeq <= prevSeq) {
+				return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+			}
+			stream.streamEntries = append(stream.streamEntries, newEntry)
 		} else {
 			return "-ERR not steram\r\n"
 		}
 	} else {
 		newStream := &stream{
-			streamEntries: map[string]*streamEntry{
-				streamId: newEntry,
+			streamEntries: []*streamEntry{
+				newEntry,
 			},
 		}
 		newItem := item{
@@ -596,7 +608,7 @@ func (c *Cache) cmdXadd(args []string) string {
 		c.items[streamKey] = &newItem
 	}
 
-	return fmt.Sprintf("$%d\r\n%s\r\n", len(streamId), streamId)
+	return fmt.Sprintf("$%d\r\n%s\r\n", len(args[1]), args[1])
 }
 
 // --- Cache clear ---
