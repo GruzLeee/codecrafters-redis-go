@@ -558,12 +558,16 @@ func (c *Cache) cmdType(args []string) string {
 }
 
 func (c *Cache) cmdXadd(args []string) string {
-	if len(args) < 4 {
+	if len(args) < 3 {
 		return "-ERR wrong number of arguments for 'xadd' command\r\n"
 	}
 
 	streamKey := args[0]
-	streamId := strings.Split(args[1], "-")
+	idStr := args[1]
+	if args[1] == "*" {
+		idStr = "*-*"
+	}
+	streamId := strings.Split(idStr, "-")
 	if len(streamId) != 2 {
 		return "-ERR wrong id format\r\n"
 	}
@@ -581,6 +585,8 @@ func (c *Cache) cmdXadd(args []string) string {
 			return "-ERR\r\n"
 		}
 		newEntry.msTime = time.UnixMilli(timeInt)
+	} else {
+		newEntry.msTime = time.Now()
 	}
 
 	if streamId[1] != "*" {
