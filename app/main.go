@@ -58,8 +58,9 @@ type stream struct {
 }
 
 type streamEntry struct {
-	id string
-	kv map[string]string
+	msTime time.Time
+	seqNum int64
+	kv     map[string]string
 }
 
 func main() {
@@ -569,12 +570,27 @@ func (c *Cache) cmdXadd(args []string) string {
 	if args[1] == "0-0" {
 		return "-ERR The ID specified in XADD must be greater than 0-0\r\n"
 	}
-	newMsTime := streamId[0]
-	newSeq := streamId[1]
 
 	newEntry := &streamEntry{
-		id: args[1],
 		kv: make(map[string]string),
+	}
+
+	if streamId[0] != "*" {
+		timeInt, err := strconv.ParseInt(streamId[0], 10, 64)
+		if err != nil {
+			return "-ERR\r\n"
+		}
+		newEntry.msTime = time.UnixMilli(timeInt)
+	}
+
+	if streamId[1] != "*" {
+		seqInt, err := strconv.ParseInt(streamId[1], 10, 64)
+		if err != nil {
+			return "-ERR\r\n"
+		}
+		newEntry.seqNum = seqInt
+	} else if newEntry.msTime.UnixMilli() == 0 {
+		newEntry.seqNum = 1
 	}
 
 	for i := 2; i < len(args[2:]); i += 2 {
@@ -585,11 +601,17 @@ func (c *Cache) cmdXadd(args []string) string {
 	defer c.mu.Unlock()
 	if i, exists := c.items[streamKey]; exists {
 		if stream, ok := i.value.(*stream); ok {
-			prevId := strings.Split(stream.streamEntries[len(stream.streamEntries)-1].id, "-")
-			prevMsTime := prevId[0]
-			prevSeq := prevId[1]
-			if newMsTime < prevMsTime || (newMsTime == prevMsTime && newSeq <= prevSeq) {
+			prevEntry := stream.streamEntries[len(stream.streamEntries)-1]
+			prevMsTime := prevEntry.msTime
+			prevSeq := prevEntry.seqNum
+			if newEntry.msTime.Before(prevMsTime) {
 				return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+			} else if newEntry.msTime.Equal(prevMsTime) && newEntry.seqNum <= prevSeq {
+				if streamId[1] == "*" {
+					newEntry.seqNum = prevSeq + 1
+				} else {
+					return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+				}
 			}
 			stream.streamEntries = append(stream.streamEntries, newEntry)
 		} else {
@@ -607,8 +629,8 @@ func (c *Cache) cmdXadd(args []string) string {
 		}
 		c.items[streamKey] = &newItem
 	}
-
-	return fmt.Sprintf("$%d\r\n%s\r\n", len(args[1]), args[1])
+	ss := fmt.Sprintf("%d-%d", newEntry.msTime.UnixMilli(), newEntry.seqNum)
+	return fmt.Sprintf("$%d\r\n%s\r\n", len(ss), ss)
 }
 
 // --- Cache clear ---
