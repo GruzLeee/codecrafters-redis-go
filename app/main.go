@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -54,13 +56,18 @@ type consumer struct {
 }
 
 type stream struct {
-	streamEntries []*streamEntry
+	head  *streamEntry
+	tail  *streamEntry
+	count int
 }
 
 type streamEntry struct {
 	msTime time.Time
 	seqNum int64
+	count  int
 	kv     map[string]string
+	next   *streamEntry
+	prev   *streamEntry
 }
 
 func main() {
@@ -92,6 +99,7 @@ func main() {
 		"BLPOP":  cache.cmdBlpop,
 		"TYPE":   cache.cmdType,
 		"XADD":   cache.cmdXadd,
+		"XRANGE": cache.cmdXrange,
 	}
 
 	for {
@@ -599,15 +607,19 @@ func (c *Cache) cmdXadd(args []string) string {
 		newEntry.seqNum = 1
 	}
 
-	for i := 2; i < len(args[2:]); i += 2 {
+	// log.Print(args[2:])
+	for i := 2; i < len(args); i += 2 {
 		newEntry.kv[args[i]] = args[i+1]
+		newEntry.count++
 	}
+
+	// log.Printf("%#v\n%#v", newEntry, newEntry.kv)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if i, exists := c.items[streamKey]; exists {
 		if stream, ok := i.value.(*stream); ok {
-			prevEntry := stream.streamEntries[len(stream.streamEntries)-1]
+			prevEntry := stream.tail
 			prevMsTime := prevEntry.msTime
 			prevSeq := prevEntry.seqNum
 			if newEntry.msTime.Before(prevMsTime) {
@@ -619,15 +631,18 @@ func (c *Cache) cmdXadd(args []string) string {
 					return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
 				}
 			}
-			stream.streamEntries = append(stream.streamEntries, newEntry)
+			newEntry.prev = stream.tail
+			stream.tail.next = newEntry
+			stream.tail = newEntry
+			stream.count++
 		} else {
 			return "-ERR not steram\r\n"
 		}
 	} else {
 		newStream := &stream{
-			streamEntries: []*streamEntry{
-				newEntry,
-			},
+			head:  newEntry,
+			tail:  newEntry,
+			count: 1,
 		}
 		newItem := item{
 			value:  newStream,
@@ -639,7 +654,61 @@ func (c *Cache) cmdXadd(args []string) string {
 	return fmt.Sprintf("$%d\r\n%s\r\n", len(ss), ss)
 }
 
-// --- Cache clear ---
+func (c *Cache) cmdXrange(args []string) string {
+	if len(args) != 3 {
+		return "-ERR wrong number of arguments for 'type' command"
+	}
+
+	startId, err := parseId(args[1])
+	if err != nil {
+		return err.Error()
+	}
+
+	endId, err := parseId(args[2])
+	if err != nil {
+		return err.Error()
+	}
+
+	if startId.msTime.After(endId.msTime) {
+		return "-ERR\r\n"
+	}
+
+	if endId.seqNr == -1 {
+		endId.seqNr = math.MaxInt64
+	}
+
+	key := args[0]
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if i, exists := c.items[key]; exists {
+		if stream, ok := i.value.(*stream); ok {
+			var respArray strings.Builder
+			var count int
+			for cur := stream.head; cur != nil; cur = cur.next {
+				if cur.msTime.After(endId.msTime) || (cur.msTime.Equal(endId.msTime) && cur.seqNum > endId.seqNr) {
+					break
+				}
+				if cur.msTime.Before(startId.msTime) || (cur.msTime.Equal(startId.msTime) && cur.seqNum < startId.seqNr) {
+					continue
+				}
+				fmt.Fprintf(&respArray, "*2\r\n")
+				id := fmt.Sprintf("%d-%d", cur.msTime.UnixMilli(), cur.seqNum)
+				fmt.Fprintf(&respArray, "$%d\r\n%s\r\n", len(id), id)
+				fmt.Fprintf(&respArray, "*%d\r\n", cur.count*2)
+				for k, v := range cur.kv {
+					fmt.Fprintf(&respArray, "$%d\r\n%s\r\n", len(k), k)
+					fmt.Fprintf(&respArray, "$%d\r\n%s\r\n", len(v), v)
+				}
+				count++
+			}
+			return fmt.Sprintf("*%d\r\n%s", count, respArray.String())
+		}
+	}
+
+	return ""
+}
 
 func (c *Cache) reapLoop() {
 	ticker := time.NewTicker(c.interval)
@@ -667,4 +736,26 @@ func logArray(head *restArrayElement) {
 	for curr := head; curr != nil; curr = curr.next {
 		log.Printf("%s", curr.data)
 	}
+}
+
+type streamId struct {
+	msTime time.Time
+	seqNr  int64
+}
+
+func parseId(id string) (streamId, error) {
+	var stream streamId
+	idParts := strings.Split(id, "-")
+	msInt, err := strconv.ParseInt(idParts[0], 10, 64)
+	if err != nil {
+		return streamId{}, errors.New("-ERR\r\n")
+	}
+	stream.msTime = time.UnixMilli(msInt)
+	stream.seqNr = -1
+	if len(idParts) == 2 {
+		if stream.seqNr, err = strconv.ParseInt(idParts[1], 10, 64); err != nil {
+			return streamId{}, errors.New("-ERR\r\n")
+		}
+	}
+	return stream, nil
 }
