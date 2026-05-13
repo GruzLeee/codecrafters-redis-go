@@ -750,6 +750,12 @@ func parseId(id string) (streamId, error) {
 			seqNr:  0,
 		}, nil
 	}
+	if id == "+" {
+		return streamId{
+			msTime: time.UnixMilli(math.MaxInt64),
+			seqNr:  math.MaxInt64,
+		}, nil
+	}
 	var stream streamId
 	idParts := strings.Split(id, "-")
 	msInt, err := strconv.ParseInt(idParts[0], 10, 64)
