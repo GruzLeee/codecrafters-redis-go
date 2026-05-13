@@ -707,7 +707,7 @@ func (c *Cache) cmdXrange(args []string) string {
 		}
 	}
 
-	return ""
+	return "*0\r\n"
 }
 
 func (c *Cache) reapLoop() {
@@ -744,6 +744,12 @@ type streamId struct {
 }
 
 func parseId(id string) (streamId, error) {
+	if id == "-" {
+		return streamId{
+			msTime: time.Time{},
+			seqNr:  0,
+		}, nil
+	}
 	var stream streamId
 	idParts := strings.Split(id, "-")
 	msInt, err := strconv.ParseInt(idParts[0], 10, 64)
