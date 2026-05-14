@@ -100,6 +100,7 @@ func main() {
 		"TYPE":   cache.cmdType,
 		"XADD":   cache.cmdXadd,
 		"XRANGE": cache.cmdXrange,
+		"XREAD":  cache.cmdXread,
 	}
 
 	for {
@@ -708,6 +709,20 @@ func (c *Cache) cmdXrange(args []string) string {
 	}
 
 	return "*0\r\n"
+}
+
+func (c *Cache) cmdXread(args []string) string {
+	if len(args) != 3 {
+		return "-ERR\r\n"
+	}
+
+	if strings.ToLower(args[0]) == "streams" {
+		args = append(args, "+")
+		return fmt.Sprintf("*1\r\n*2\r\n$%d\r\n%s\r\n%s", len(args[1]), args[1], c.cmdXrange(args[1:]))
+	}
+
+	return "-ERR\r\n"
+
 }
 
 func (c *Cache) reapLoop() {
