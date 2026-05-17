@@ -712,17 +712,22 @@ func (c *Cache) cmdXrange(args []string) string {
 }
 
 func (c *Cache) cmdXread(args []string) string {
-	if len(args) != 3 {
+	if len(args) < 3 {
 		return "-ERR\r\n"
 	}
 
 	if strings.ToLower(args[0]) == "streams" {
-		args = append(args, "+")
-		return fmt.Sprintf("*1\r\n*2\r\n$%d\r\n%s\r\n%s", len(args[1]), args[1], c.cmdXrange(args[1:]))
+		half := len(args[1:]) / 2
+		keyes := args[1 : half+1]
+		ids := args[half+1:]
+		var xrangeString strings.Builder
+		for i := 0; i < len(keyes); i++ {
+			fmt.Fprintf(&xrangeString, "*2\r\n$%d\r\n%s\r\n%s", len(keyes[i]), keyes[i], c.cmdXrange([]string{keyes[i], ids[i], "+"}))
+		}
+		return fmt.Sprintf("*%d\r\n%s", half, xrangeString.String())
+
 	}
-
 	return "-ERR\r\n"
-
 }
 
 func (c *Cache) reapLoop() {
