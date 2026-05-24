@@ -926,7 +926,12 @@ func (c *Cache) cmdIncr(args []string) string {
 			}
 			// log.Print(val)
 		}
-		// log.Print(i)
+	} else {
+		c.items[key] = &item{
+			value:  "1",
+			expiry: time.Time{},
+		}
+		return ":1\r\n"
 	}
 	return "-ERR\r\n"
 }
