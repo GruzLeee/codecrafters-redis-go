@@ -115,6 +115,7 @@ func main() {
 		"XADD":   cache.cmdXadd,
 		"XRANGE": cache.cmdXrange,
 		"XREAD":  cache.cmdXread,
+		"INCR":   cache.cmdIncr,
 	}
 
 	for {
@@ -904,6 +905,30 @@ func (c *Cache) cmdXread(args []string) string {
 	c.mu.Unlock()
 
 	return retString
+}
+
+func (c *Cache) cmdIncr(args []string) string {
+	if len(args) != 1 {
+		return "-ERR wrong number of arguments\r\n"
+	}
+
+	key := args[0]
+	if i, exists := c.items[key]; exists {
+		if str, ok := i.value.(string); ok {
+			val, err := strconv.ParseInt(str, 10, 64)
+			if err == nil {
+				val++
+				c.items[key] = &item{
+					value:  strconv.FormatInt(val, 10),
+					expiry: i.expiry,
+				}
+				return fmt.Sprintf(":%d\r\n", val)
+			}
+			// log.Print(val)
+		}
+		// log.Print(i)
+	}
+	return "-ERR\r\n"
 }
 
 func (c *Cache) reapLoop() {
