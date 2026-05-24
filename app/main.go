@@ -37,10 +37,11 @@ type restArray struct {
 }
 
 type Cache struct {
-	items    map[string]*item
-	mu       sync.Mutex
-	interval time.Duration
-	popQueue map[string]*consumerQueue
+	items       map[string]*item
+	mu          sync.Mutex
+	interval    time.Duration
+	popQueue    map[string]*consumerQueue
+	streamQueue map[string]*xreadConsumerQueue
 }
 
 type consumerQueue struct {
@@ -53,6 +54,18 @@ type consumer struct {
 	next *consumer
 	prev *consumer
 	ch   chan *restArray
+}
+
+type xreadConsumer struct {
+	next *xreadConsumer
+	prev *xreadConsumer
+	ch   chan struct{}
+}
+
+type xreadConsumerQueue struct {
+	head  *xreadConsumer
+	tail  *xreadConsumer
+	count int
 }
 
 type stream struct {
@@ -79,9 +92,10 @@ func main() {
 	defer l.Close()
 
 	cache := &Cache{
-		items:    make(map[string]*item),
-		interval: time.Hour,
-		popQueue: make(map[string]*consumerQueue),
+		items:       make(map[string]*item),
+		interval:    time.Hour,
+		popQueue:    make(map[string]*consumerQueue),
+		streamQueue: make(map[string]*xreadConsumerQueue),
 	}
 
 	go cache.reapLoop()
@@ -651,6 +665,14 @@ func (c *Cache) cmdXadd(args []string) string {
 		}
 		c.items[streamKey] = &newItem
 	}
+	if queue, exists := c.streamQueue[streamKey]; exists {
+		for nc := queue.head; nc != nil; nc = nc.next {
+			select {
+			case nc.ch <- struct{}{}:
+			default:
+			}
+		}
+	}
 	ss := fmt.Sprintf("%d-%d", newEntry.msTime.UnixMilli(), newEntry.seqNum)
 	return fmt.Sprintf("$%d\r\n%s\r\n", len(ss), ss)
 }
@@ -711,23 +733,177 @@ func (c *Cache) cmdXrange(args []string) string {
 	return "*0\r\n"
 }
 
+func (c *Cache) xreadEntries(keys, ids []string) string {
+	var result strings.Builder
+	count := 0
+	for i, key := range keys {
+		startId, err := parseId(ids[i])
+		if err != nil {
+			continue
+		}
+		it, exists := c.items[key]
+		if !exists {
+			continue
+		}
+		s, ok := it.value.(*stream)
+		if !ok {
+			continue
+		}
+		var entries strings.Builder
+		entryCount := 0
+		for cur := s.head; cur != nil; cur = cur.next {
+			if cur.msTime.Before(startId.msTime) || (cur.msTime.Equal(startId.msTime) && cur.seqNum <= startId.seqNr) {
+				continue
+			}
+			id := fmt.Sprintf("%d-%d", cur.msTime.UnixMilli(), cur.seqNum)
+			fmt.Fprintf(&entries, "*2\r\n$%d\r\n%s\r\n*%d\r\n", len(id), id, cur.count*2)
+			for k, v := range cur.kv {
+				fmt.Fprintf(&entries, "$%d\r\n%s\r\n$%d\r\n%s\r\n", len(k), k, len(v), v)
+			}
+			entryCount++
+		}
+		if entryCount == 0 {
+			continue
+		}
+		fmt.Fprintf(&result, "*2\r\n$%d\r\n%s\r\n*%d\r\n%s", len(key), key, entryCount, entries.String())
+		count++
+	}
+	if count == 0 {
+		return ""
+	}
+	return fmt.Sprintf("*%d\r\n%s", count, result.String())
+}
+
 func (c *Cache) cmdXread(args []string) string {
 	if len(args) < 3 {
-		return "-ERR\r\n"
+		return "-ERR wrong number of arguments\r\n"
 	}
 
-	if strings.ToLower(args[0]) == "streams" {
-		half := len(args[1:]) / 2
-		keyes := args[1 : half+1]
-		ids := args[half+1:]
-		var xrangeString strings.Builder
-		for i := 0; i < len(keyes); i++ {
-			fmt.Fprintf(&xrangeString, "*2\r\n$%d\r\n%s\r\n%s", len(keyes[i]), keyes[i], c.cmdXrange([]string{keyes[i], ids[i], "+"}))
+	idx := 0
+	blockMs := int64(-1)
+
+	if strings.ToUpper(args[idx]) == "BLOCK" {
+		idx++
+		if idx >= len(args) {
+			return "-ERR syntax error\r\n"
 		}
-		return fmt.Sprintf("*%d\r\n%s", half, xrangeString.String())
-
+		ms, err := strconv.ParseInt(args[idx], 10, 64)
+		if err != nil {
+			return "-ERR invalid BLOCK timeout\r\n"
+		}
+		blockMs = ms
+		idx++
 	}
-	return "-ERR\r\n"
+
+	if idx >= len(args) || strings.ToUpper(args[idx]) != "STREAMS" {
+		return "-ERR syntax error\r\n"
+	}
+	idx++
+
+	rest := args[idx:]
+	if len(rest) == 0 || len(rest)%2 != 0 {
+		return "-ERR syntax error\r\n"
+	}
+	half := len(rest) / 2
+	keys := rest[:half]
+	ids := rest[half:]
+
+	c.mu.Lock()
+
+	resolvedIds := make([]string, len(ids))
+	for i, id := range ids {
+		if id == "$" {
+			resolvedIds[i] = "0-0"
+			if it, exists := c.items[keys[i]]; exists {
+				if s, ok := it.value.(*stream); ok && s.tail != nil {
+					resolvedIds[i] = fmt.Sprintf("%d-%d", s.tail.msTime.UnixMilli(), s.tail.seqNum)
+				}
+			}
+		} else {
+			resolvedIds[i] = id
+		}
+	}
+
+	if blockMs < 0 {
+		result := c.xreadEntries(keys, resolvedIds)
+		c.mu.Unlock()
+		if result == "" {
+			return "*-1\r\n"
+		}
+		return result
+	}
+
+	result := c.xreadEntries(keys, resolvedIds)
+	if result != "" {
+		c.mu.Unlock()
+		return result
+	}
+
+	sharedCh := make(chan struct{}, len(keys))
+	consumers := make([]*xreadConsumer, len(keys))
+	for i, key := range keys {
+		nc := &xreadConsumer{ch: sharedCh}
+		consumers[i] = nc
+		if queue, exists := c.streamQueue[key]; exists {
+			nc.prev = queue.tail
+			queue.tail.next = nc
+			queue.tail = nc
+			queue.count++
+		} else {
+			c.streamQueue[key] = &xreadConsumerQueue{head: nc, tail: nc, count: 1}
+		}
+	}
+
+	c.mu.Unlock()
+
+	var timeout <-chan time.Time
+	if blockMs > 0 {
+		timeout = time.After(time.Duration(blockMs) * time.Millisecond)
+	}
+
+	var retString string
+	select {
+	case <-sharedCh:
+		c.mu.Lock()
+		retString = c.xreadEntries(keys, resolvedIds)
+		c.mu.Unlock()
+		if retString == "" {
+			retString = "*-1\r\n"
+		}
+	case <-timeout:
+		retString = "*-1\r\n"
+	}
+
+	c.mu.Lock()
+	for i, key := range keys {
+		nc := consumers[i]
+		queue := c.streamQueue[key]
+		if queue == nil {
+			continue
+		}
+		queue.count--
+		if queue.count == 0 {
+			delete(c.streamQueue, key)
+			continue
+		}
+		if queue.head == nc {
+			queue.head = nc.next
+			if queue.head != nil {
+				queue.head.prev = nil
+			}
+		} else if queue.tail == nc {
+			queue.tail = nc.prev
+			if queue.tail != nil {
+				queue.tail.next = nil
+			}
+		} else {
+			nc.prev.next = nc.next
+			nc.next.prev = nc.prev
+		}
+	}
+	c.mu.Unlock()
+
+	return retString
 }
 
 func (c *Cache) reapLoop() {
