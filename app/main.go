@@ -926,6 +926,7 @@ func (c *Cache) cmdIncr(args []string) string {
 			}
 			// log.Print(val)
 		}
+		return "-ERR value is not an integer or out of range\r\n"
 	} else {
 		c.items[key] = &item{
 			value:  "1",
