@@ -22,6 +22,7 @@
   }
 },
 "mounts": [
-  "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached"
+  "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
+  "source=${localEnv:HOME}/.agents,target=/home/vscode/.agents,type=bind,consistency=cached"
 ]
 }

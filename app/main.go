@@ -83,6 +83,11 @@ type streamEntry struct {
 	prev   *streamEntry
 }
 
+type ququeCmd struct {
+	name string
+	args []string
+}
+
 func main() {
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
@@ -162,15 +167,60 @@ func readCommand(r *bufio.Reader) ([]string, error) {
 func handleConnection(conn net.Conn, commands map[string]handler) {
 	defer conn.Close()
 	r := bufio.NewReader(conn)
+	var inMulti bool
+	var txQueue []ququeCmd
 	for {
 		args, err := readCommand(r)
 		if err != nil {
 			return
 		}
 		name := strings.ToUpper(args[0])
+		if name == "MULTI" {
+			if inMulti {
+				conn.Write([]byte("-ERR MULTI calls can not be nested\r\n"))
+				continue
+			}
+			inMulti = true
+			conn.Write([]byte("+OK\r\n"))
+			continue
+		}
+		if name == "DISCARD" {
+			if !inMulti {
+				conn.Write([]byte("-ERR DISCARD without MULTI\r\n"))
+				continue
+			}
+			inMulti = false
+			txQueue = nil
+			conn.Write([]byte("+OK\r\n"))
+			continue
+		}
+		if name == "EXEC" {
+			if !inMulti {
+				conn.Write([]byte("-ERR EXEC without MULTI\r\n"))
+				continue
+			}
+			inMulti = false
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "*%d\r\n", len(txQueue))
+			for _, cmd := range txQueue {
+				h, ok := commands[cmd.name]
+				if ok {
+					sb.WriteString(h(cmd.args))
+				} else {
+					sb.WriteString("-ERR unknown command '" + cmd.name + "'\r\n")
+				}
+			}
+			txQueue = nil
+			conn.Write([]byte(sb.String()))
+			continue
+		}
+		if inMulti {
+			txQueue = append(txQueue, ququeCmd{name: name, args: args[1:]})
+			conn.Write([]byte("+QUEUED\r\n"))
+			continue
+		}
 		h, ok := commands[name]
 		var resp string
-		// log.Print(conn.RemoteAddr())
 		if ok {
 			resp = h(args[1:])
 		} else {
